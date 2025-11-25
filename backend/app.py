@@ -133,8 +133,3 @@ def delete_todo(id):
     return jsonify({"message": "Todo deleted!"})
 
 
-# ---------------------------------------
-# Run App
-# ---------------------------------------
-if __name__ == "__main__":
-    app.run(debug=True)
