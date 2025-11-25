@@ -9,7 +9,6 @@ import {
   FaCheck,
   FaBars,
   FaDownload,
-  FaUpload,
   FaUndo,
   FaSearch,
 } from "react-icons/fa";
@@ -18,20 +17,21 @@ import "./App.css";
 /* -------------------------
    Constants & helpers
    ------------------------- */
-const API_TODOS = "https://task-manager3-1lon.onrender.com/api/todos";
+const API_TODOS = "http://127.0.0.1:5000/api/todos";
 const COLUMNS_KEY = "tm_vmax_columns";
 const TASKS_KEY = "tm_vmax_tasks";
 const ACTIVITY_KEY = "tm_vmax_activity";
 const THEME_KEY = "tm_vmax_theme";
 
 const DEFAULT_COLUMNS = [
-  { id: "TaskManager", title: "Task Manager" },
+  { id: "to do", title: "To Do" },
   { id: "inprogress", title: "In Progress" },
   { id: "done", title: "Done" },
 ];
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
+/* Safe fetch helper that returns parsed JSON or null on failure */
 async function tryBackend(url, method = "POST", body = {}) {
   try {
     const res = await fetch(url, {
@@ -356,6 +356,60 @@ export default function App() {
   }, []);
 
   /* -------------------------
+     Backend sync
+  -------------------------- */
+  const normalizeFromBackend = useCallback(
+    (b) => {
+      // backend returns fields like dueDate and reminder_enabled
+      return {
+        id: String(b.id ?? b.id ?? uid()),
+        text: b.text ?? "",
+        description: b.description ?? "",
+        completed: !!b.completed,
+        due_date: b.dueDate ?? b.due_date ?? "",
+        priority: b.priority ?? "Low",
+        reminder_enabled: typeof b.reminder_enabled !== "undefined" ? !!b.reminder_enabled : true,
+        // status & position are client-side; default to first column
+        status: b.status ?? columns[0]?.id ?? DEFAULT_COLUMNS[0].id,
+        position: typeof b.position !== "undefined" ? b.position : 0,
+        tags: Array.isArray(b.tags) ? b.tags : [],
+        subtasks: Array.isArray(b.subtasks) ? b.subtasks : [],
+      };
+    },
+    [columns]
+  );
+
+  const fetchTodos = useCallback(async () => {
+    const data = await tryBackend(API_TODOS, "GET", {});
+    if (!data) {
+      pushActivity("Failed to fetch todos from server");
+      return;
+    }
+    // assume `data` is array of todos
+    if (!Array.isArray(data)) return;
+    const mapped = data.map(normalizeFromBackend);
+    setTasks((prev) => {
+      // Merge server tasks with local (preserve local-only fields like status if id matches)
+      const localById = new Map(prev.map((t) => [t.id, t]));
+      const merged = mapped.map((s) => {
+        const local = localById.get(s.id);
+        if (!local) return s;
+        // prefer local.status/position if present
+        return { ...s, status: local.status ?? s.status, position: local.position ?? s.position };
+      });
+      // also keep local tasks that don't exist on server (temporary local items)
+      const serverIds = new Set(merged.map((m) => m.id));
+      const localsOnly = prev.filter((t) => !serverIds.has(t.id));
+      return [...merged, ...localsOnly];
+    });
+    pushActivity("Synchronized todos from server");
+  }, [normalizeFromBackend, pushActivity]);
+
+  useEffect(() => {
+    fetchTodos();
+  }, [fetchTodos]);
+
+  /* -------------------------
      Single Browser Reminder (one-time per session)
   -------------------------- */
   const notifiedRef = useRef(new Set());
@@ -453,16 +507,28 @@ export default function App() {
         subtasks: [],
         description: "",
       };
+      // optimistic
       setTasks((s) => [t, ...s]);
       setNewText("");
       setNewDue("");
       setNewPriority("Low");
       pushActivity(`Added "${t.text}"`);
+
+      // notify backend then refresh
       try {
-        await tryBackend(API_TODOS, "POST", t);
-      } catch {}
+        await tryBackend(API_TODOS, "POST", {
+          text: t.text,
+          completed: t.completed,
+          dueDate: t.due_date,
+          priority: t.priority,
+          reminder_enabled: true,
+        });
+        await fetchTodos();
+      } catch {
+        pushActivity("Failed to add task on server");
+      }
     },
-    [newText, newDue, newPriority, columns, colMap, pushActivity]
+    [newText, newDue, newPriority, columns, colMap, pushActivity, fetchTodos]
   );
 
   /* Update task — auto-move to done/first column when completed toggled */
@@ -498,10 +564,20 @@ export default function App() {
 
       pushActivity(`Updated task ${id}`);
       try {
-        await tryBackend(`${API_TODOS}/${id}`, "PUT", updates);
-      } catch {}
+        // map client field names to backend expected names
+        const payload = {};
+        if (typeof updates.text !== "undefined") payload.text = updates.text;
+        if (typeof updates.completed !== "undefined") payload.completed = updates.completed;
+        if (typeof updates.priority !== "undefined") payload.priority = updates.priority;
+        if (typeof updates.due_date !== "undefined") payload.dueDate = updates.due_date;
+        if (typeof updates.position !== "undefined") payload.position = updates.position;
+        await tryBackend(`${API_TODOS}/${id}`, "PUT", payload);
+        await fetchTodos();
+      } catch {
+        pushActivity("Failed to update task on server");
+      }
     },
-    [pushActivity, columns]
+    [pushActivity, columns, fetchTodos]
   );
 
   /* Delete with undo */
@@ -515,9 +591,12 @@ export default function App() {
       pushActivity(`Deleted "${found.text}"`);
       try {
         await tryBackend(`${API_TODOS}/${id}`, "DELETE", {});
-      } catch {}
+        await fetchTodos();
+      } catch {
+        pushActivity("Failed to delete task on server");
+      }
     },
-    [tasks, pushActivity]
+    [tasks, pushActivity, fetchTodos]
   );
 
   const undo = useCallback(() => {
@@ -553,12 +632,15 @@ export default function App() {
         const [moved] = columnTasks.splice(source.index, 1);
         columnTasks.splice(destination.index, 0, moved);
 
-        const reordered = new Map(columnTasks.map((task, idx) => [task.id, { ...task, position: idx }]));
+        const reordered = new Map(columnTasks.map((task, idx) => [task.id, { ...task, position: idx }] ));
         setTasks((prev) => prev.map((t) => (t.status !== srcCol ? t : reordered.get(t.id) || t)));
         if (moved) pushActivity(`Reordered "${moved.text}"`);
         try {
           await tryBackend(`${API_TODOS}/${moved.id}`, "PUT", { position: destination.index });
-        } catch {}
+          await fetchTodos();
+        } catch {
+          pushActivity("Failed to persist reorder to server");
+        }
         return;
       }
 
@@ -591,10 +673,17 @@ export default function App() {
 
       pushActivity(`Moved "${moved.text}"`);
       try {
-        await tryBackend(`${API_TODOS}/${moved.id}`, "PUT", updatedMoved);
-      } catch {}
+        await tryBackend(`${API_TODOS}/${moved.id}`, "PUT", {
+          status: updatedMoved.status,
+          completed: updatedMoved.completed,
+          position: destination.index,
+        });
+        await fetchTodos();
+      } catch {
+        pushActivity("Failed to move task on server");
+      }
     },
-    [columns, colMap, tasks, pushActivity]
+    [columns, colMap, tasks, pushActivity, fetchTodos]
   );
 
   /* Quick add */

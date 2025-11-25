@@ -158,3 +158,9 @@ def delete_todo(id):
     return jsonify({"message": "Todo deleted!"})
 
 
+# ---------------------------------------
+# Run server
+# ---------------------------------------
+if __name__ == "__main__":
+    # For Render, use gunicorn in production; this is for local/dev testing.
+    app.run(debug=True, host="0.0.0.0", port=5000)
