@@ -17,7 +17,7 @@ import "./App.css";
 /* -------------------------
    Constants & helpers
    ------------------------- */
-const API_TODOS = "https://task-manager3-1lon.onrender.com/api/todos";
+const API_TODOS = import.meta.env.VITE_API_URL || "https://task-manager3-1lon.onrender.com/api/todos";
 const COLUMNS_KEY = "tm_vmax_columns";
 const TASKS_KEY = "tm_vmax_tasks";
 const ACTIVITY_KEY = "tm_vmax_activity";
